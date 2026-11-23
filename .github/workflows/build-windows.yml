@@ -1,1 +1,104 @@
+name: Build Keypunch for Windows
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Setup MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-rust
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-blueprint-compiler
+            mingw-w64-ucrt-x86_64-gettext-tools
+            mingw-w64-ucrt-x86_64-gettext-runtime
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme
+            mingw-w64-ucrt-x86_64-hicolor-icon-theme
+            mingw-w64-ucrt-x86_64-gsettings-desktop-schemas
+            mingw-w64-ucrt-x86_64-desktop-file-utils
+            mingw-w64-ucrt-x86_64-appstream
+            mingw-w64-ucrt-x86_64-librsvg
+
+      - name: Clone Keypunch
+        run: |
+          git clone https://github.com/bragefuglseth/keypunch.git
+          cd keypunch
+
+      - name: Patch for Windows
+        run: |
+          cd keypunch
+          # مخفی کردن پنجره کنسول در نسخه Release ویندوز
+          sed -i '1i #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]' src/main.rs
+
+          # اصلاح پسوند .exe در فایل src/meson.build
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("src/meson.build")
+          txt = p.read_text(encoding="utf-8")
+          txt = txt.replace(
+              "output: meson.project_name(),",
+              "output: meson.project_name() + '.exe',"
+          )
+          txt = txt.replace(
+              "rust_target / meson.project_name(),",
+              "rust_target / (meson.project_name() + '.exe'),"
+          )
+          txt = txt.replace(
+              "'src' / rust_target / meson.project_name()",
+              "'src' / rust_target / (meson.project_name() + '.exe')"
+          )
+          p.write_text(txt, encoding="utf-8")
+          EOF
+          git diff src/meson.build
+
+      - name: Compile and Install
+        run: |
+          cd keypunch
+          meson setup _build --prefix=/ucrt64 --buildtype=release
+          meson compile -C _build
+          meson install -C _build
+
+      - name: Bundle Portable Windows Package
+        run: |
+          mkdir -p dist/bin dist/share dist/lib
+
+          # کپی فایل اجرایی و DLLهای اصلی
+          cp /ucrt64/bin/keypunch.exe dist/bin/
+          ldd dist/bin/keypunch.exe | grep '/ucrt64/bin/' | awk '{print $3}' | sort -u | xargs -r -I '{}' cp -u '{}' dist/bin/
+          cp -u /ucrt64/bin/gdbus.exe /ucrt64/bin/gspawn-win64-helper*.exe dist/bin/ 2>/dev/null || true
+
+          # کپی منابع برنامه، آیکون‌ها، ترجمه‌ها و Schemaها
+          cp -r /ucrt64/share/keypunch dist/share/ 2>/dev/null || true
+          cp -r /ucrt64/share/glib-2.0 dist/share/
+          cp -r /ucrt64/share/icons dist/share/
+          cp -r /ucrt64/share/locale dist/share/ 2>/dev/null || true
+
+          # کپی لودرهای SVG و وابستگی‌های librsvg
+          cp -r /ucrt64/lib/gdk-pixbuf-2.0 dist/lib/
+          find dist/lib/gdk-pixbuf-2.0 -name '*.dll' -exec ldd {} + 2>/dev/null \
+            | grep '/ucrt64/bin/' | awk '{print $3}' | sort -u \
+            | xargs -r -I '{}' cp -u '{}' dist/bin/
+
+          glib-compile-schemas dist/share/glib-2.0/schemas
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keypunch-windows-x64
+          path: dist/
